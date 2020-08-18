@@ -1,0 +1,172 @@
+#Bibliotecas a serem importadas
+import re
+from bs4 import BeautifulSoup
+from requests import get
+from pandas.io.html import read_html
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set()
+from sklearn.cluster import KMeans
+
+#Nome dos deputados que estão salvo como id's na página da camera
+df_total = pd.DataFrame()
+r4 = get('https://www.camara.leg.br/deputados/quem-sao')
+data4 = BeautifulSoup(r4.content.decode('utf-8'), "html.parser")
+metas = data4.find_all('option')
+deputadosid = []
+for i in metas:
+    try:
+        deputadosid.append(i.attrs['value'])
+    except:
+        pass
+    
+teste=pd.DataFrame(deputadosid)
+#Analiando o HTML do site foi possível descobrir que há 550 deputados cadastrados, por isso a lista vai até 550
+teste = teste[1:550]
+lista = teste[0].values.tolist()
+
+#Busca na página de cada deputado o valor gato com verba parlamentar em 2019
+final = pd.DataFrame()
+
+for i in lista:
+    try:
+        df = pd.DataFrame()
+        
+        
+        pagina = 'https://www.camara.leg.br/deputados/'+str(i)+'/verba-gabinete?ano=2019'
+        tabela = read_html(pagina, attrs={'class':'table table-striped table-bordered'},decimal=',', thousands='.',header=0)
+        df = tabela[0]
+        valor = df['Valor gasto (R$)'].sum()
+        
+        
+        pagina2 = get('https://www.camara.leg.br/deputados/'+str(i)+'/verba-gabinete?ano=2019')
+        df1 = BeautifulSoup(pagina2.content.decode('utf-8'), "html.parser")
+        deputado = str(df1.find_all('h1')).replace('\n','').replace('[<h1 class="titulo-internal">','').replace('</h1>]','').replace('                        ','').replace('                ','')
+        
+        df2 = pd.DataFrame(columns=['Verba Parlamentar'],index=[deputado])
+        df2['Verba Parlamentar'] = valor
+        final = final.append(df2)
+        
+    except:
+        pass
+
+#Busca na página de cada deputado a presença em sessões
+df_total = pd.DataFrame()
+for i in lista:
+    try:
+        page = 'https://www.camara.leg.br/deputados/'+str(i)+'/presenca-plenario/2019'
+        table = read_html(page, attrs={'class':'table table-bordered'})
+        r1 = get(page)
+        data5 = BeautifulSoup(r1.content.decode('utf-8'), "html.parser")
+        a = str(data5.find_all('h1')).replace('\n','').replace('[<h1 class="titulo-internal">','').replace('</h1>]','').replace('                        ','').replace('                ','')
+        df = pd.DataFrame()
+        df = table[1]
+        df.dropna(inplace=True)
+        df.reset_index(inplace=True,drop=True)
+        df = df[2:5].T
+        df.columns=['Total de dias com sessões deliberativas realizadas no período','Total de dias com presença nas sessões deliberativas','Total de dias com ausências justificadas em sessões deliberativas']
+        df = df[1:2]
+        df['Deputado'] = a
+        df_total = df_total.append(df)
+    except ValueError:
+        pass
+df_total.reset_index(drop=True,inplace=True)    
+
+#Tratamento das bases de dados 
+for i in range(0,len(df_total)):
+    df_total['Deputado'][i] = df_total['Deputado'][i].upper()
+    
+df_total.set_index(df_total['Deputado'],drop=True,inplace=True)
+df_total = df_total[['Total de dias com sessões deliberativas realizadas no período','Total de dias com presença nas sessões deliberativas','Total de dias com ausências justificadas em sessões deliberativas']]
+
+final['Deputado'] = final.index
+for i in range(0,len(final)):
+    final['Deputado'][i] = final['Deputado'][i].upper()
+    
+final.set_index('Deputado',inplace=True,drop=True)
+
+final2 = pd.merge(final,df_total,left_index=True, right_index=True)
+
+#Busca um excel com o nome dos deputados de 2020
+import requests
+dls = "https://www2.camara.leg.br/deputados/pesquisa/arquivos/arquivo-formato-excel-com-informacoes-dos-deputados-1"
+resp = requests.get(dls)
+
+output = open('test.xls', 'wb')
+output.write(resp.content)
+output.close()
+
+#Tratamento da base de dados
+deputados_cut = pd.read_excel('test.xls')
+
+for i in range(0,len(deputados_cut)):
+    deputados_cut['Nome Parlamentar'][i] = deputados_cut['Nome Parlamentar'][i][:-1].upper()
+    
+deputados_cut.set_index('Nome Parlamentar',inplace=True)
+
+teste = pd.merge(deputados_cut,final2,how='left',left_index=True,right_index=True)
+
+base = teste[['Verba Parlamentar','Total de dias com sessões deliberativas realizadas no período','Total de dias com presença nas sessões deliberativas','Total de dias com ausências justificadas em sessões deliberativas']]
+
+base.dropna(inplace=True)
+
+#Cria o modelo KMeans
+kmeans = KMeans(4)
+kmeans.fit(base)
+
+base['cluster_pred']= kmeans.fit_predict(base)
+
+from sklearn import preprocessing
+x_scaled = preprocessing.scale(base)
+
+
+wcss =[]
+
+for i in range(1,10):
+    kmeans = KMeans(i)
+    kmeans.fit(x_scaled)
+    wcss.append(kmeans.inertia_)
+   
+   
+#Plota o gráfico WCSS
+plt.plot(range(1,10),wcss)
+plt.xlabel('Number of clusters')
+plt.ylabel('WCSS')
+
+#Cria o modelo com o melhor WCSS
+kmeans_new = KMeans(5)
+kmeans_new.fit(base)
+clusters_new = base.copy()
+clusters_new['cluster_pred'] = kmeans_new.fit_predict(base)
+
+
+#Plota o gráfico de dispersão
+from matplotlib import pyplot as plt
+
+plt.scatter(clusters_new['Total de dias com presença nas sessões deliberativas'],clusters_new['Verba Parlamentar'],c=clusters_new['cluster_pred'],cmap='rainbow')
+plt.xlabel('Presenças Totais')
+plt.ylabel('Valor Gasto')
+plt.savefig("figure.png")
+plt.show()
+
+
+#Plota o gráfico de dispersão utilizando plotly
+!pip install plotly
+
+
+import plotly.offline as py
+import plotly.graph_objs as go
+py.init_notebook_mode(connected=True)
+
+
+trace = go.Scatter(x = clusters_new['Total de dias com presença nas sessões deliberativas'],
+                   y = clusters_new['Verba Parlamentar'],
+                   mode = 'markers')
+data = [trace]
+py.iplot(data)
+
+
+
+ 
